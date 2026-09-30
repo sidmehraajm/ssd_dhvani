@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -596,6 +597,28 @@ def _publish_root(project: str) -> tuple:
     return name, str(roots[name])
 
 
+def _platform_key() -> str:
+    """AYON's name for this OS in anatomy roots."""
+    return {"win32": "windows", "darwin": "darwin"}.get(sys.platform, "linux")
+
+
+def _copy_to_share(src: str, dest: str) -> None:
+    """Copy data + timestamps. On SMB shares (especially from macOS) setting
+    the file METADATA can fail with 'Operation not permitted' even though
+    the data copied fine -- the data is what matters, so that is tolerated;
+    a failure to copy the DATA still raises."""
+    try:
+        shutil.copy2(src, dest)
+    except PermissionError:
+        shutil.copyfile(src, dest)          # data only
+        try:
+            shutil.copystat(src, dest)
+        except OSError:
+            pass
+    if os.path.getsize(dest) != os.path.getsize(src):
+        raise OSError(f"copy to {dest} is incomplete")
+
+
 def _server_publish_path(project: str, folder_id: str, product_type: str,
                          product_name: str, variant: str, version_str: str,
                          log_cb=None) -> str:
@@ -609,8 +632,19 @@ def _server_publish_path(project: str, folder_id: str, product_type: str,
     if not root_path.strip() or not os.path.isabs(root_path):
         raise ValueError(
             f"Publish root is empty or not absolute: {root_path!r} "
-            f"(roots={roots}). Set this workstation's site roots in AYON, "
-            "or files would land in a wrong/relative location.")
+            f"(roots={roots}). Set this workstation's site roots in AYON "
+            f"(project anatomy → roots → {_platform_key()}), or files would "
+            "land in a wrong/relative location.")
+    if not os.path.isdir(root_path):
+        # The share isn't mounted / mapped. NEVER create it: on a Mac,
+        # '/Volumes/<share>' would silently become a folder on the LOCAL disk
+        # and the "published" files would exist nowhere anyone else can see.
+        hint = ("Mount the studio share first (Finder → Go → Connect to "
+                "Server) — it must appear exactly at this path."
+                if sys.platform == "darwin" else
+                "Map / connect the studio drive first.")
+        raise ValueError(f"Publish root {root_path!r} is not reachable from "
+                         f"this machine. {hint}")
     fe = ayon_api.get_folder_by_id(project, folder_id)
     _cb(f"AYON folder path: {fe['path']}")
     full = os.path.join(
@@ -767,7 +801,7 @@ def _live_publish_job(job: PublishJob, log_cb=None) -> str:
     for src, rel, _fname in files:
         dest = os.path.join(dest_base, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copy2(src, dest)
+        _copy_to_share(src, dest)
 
     # ---- representations, integrator-style ------------------------------ #
     root_name, root_value = _publish_root(project)

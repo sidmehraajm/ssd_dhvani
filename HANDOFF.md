@@ -1,6 +1,6 @@
 # ssd_dhvani — Engineering Handoff
 
-**Repo:** `C:\pipeline\ssd_dhvani` · **Version:** `1.3.0` (`ssd_dhvani_v1`)
+**Repo:** `C:\pipeline\ssd_dhvani` · **Version:** `1.3.1` (`ssd_dhvani_v1`)
 **Origin:** forked from ssd_abhinaya 1.0.0 on 2026-09-30; the camera
 pipeline was replaced by an audio pipeline. Everything AYON-, shot-, take-,
 offline- and publish-related is abhinaya's proven code — its hard rules
@@ -192,9 +192,31 @@ forces that type and the plain product name (pre-1.3 behaviour).
   then allow the microphone. Running from source, Terminal asks instead.
 - Finder-launched apps don't get the shell PATH: `tools.py` also checks
   `/opt/homebrew/bin` and `/usr/local/bin` for ffmpeg.
-- AYON roots: `get_project_roots_by_site_id` returns the **darwin** root
-  values from the project's anatomy. If publish says "Publish root is empty",
-  the project needs its macOS root filled in on the AYON server.
+
+### Publishing / path resolution from a Mac (1.3.1)
+
+- **Roots:** `get_project_roots_by_site_id()` -- a Mac without the AYON
+  launcher has no site id, so AYON returns the project anatomy's **darwin**
+  roots (`/projects/<p>/siteRoots?platform=darwin`); with the launcher, that
+  site's overrides. The darwin root must be the SAME share Windows sees as
+  `P:\...`, mounted at that exact path (e.g. `/Volumes/Projects`).
+- **Writing:** files are published to `<darwin root>/<project>/<folder
+  path>/publish/...`; representations store `{root[publish]}/...` templates,
+  so Windows/DaVinci resolve them with their own root. Nothing Mac-specific
+  is stored except `attrib.path` / `source` (informational).
+- **Unmounted share:** `_server_publish_path` refuses a root that isn't an
+  existing directory -- never `makedirs` it (on macOS that would create a
+  local `/Volumes/<name>` folder and "publish" to a disk nobody sees).
+- **SMB copy:** `_copy_to_share` tolerates macOS/SMB refusing to set file
+  metadata (PermissionError after the data is written) and verifies size.
+- **Reading (Published tab, references, offline copies):**
+  `_expand_candidates` rebuilds Windows literal paths against the local
+  roots at EVERY `/{project}/` in the path. Before 1.3.1 it cut at the first
+  one -- with a root folder named like the project (`P:\Training\Training\`)
+  that produced `/Volumes/x/Training/Training/...` and nothing resolved.
+- Remount trap: macOS mounts a second copy of a share as
+  `/Volumes/Projects-1`; that no longer matches the darwin root → publish
+  refuses with the "not reachable" message. Unmount extras / reboot.
 
 ## 7. Config (`config.json`, git-ignored)
 

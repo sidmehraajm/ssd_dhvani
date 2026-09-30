@@ -79,15 +79,23 @@ def _expand_candidates(raw_paths: list[str], roots: dict,
         tail = None
         if m:
             tail = m.group(2)
+        tails: list[str] = []
+        if tail:
+            tails.append(tail)
         else:
+            # EVERY '/{project}/' in the path is a candidate cut point: with
+            # a root folder named like the project (P:\\Training\\Training\\...)
+            # the FIRST match is the root, not the project -- on a Mac that
+            # built '/Volumes/x/Training/Training/...', which doesn't exist.
             norm = p.replace("\\", "/")
             i = norm.find(marker)
-            if i >= 0:
-                tail = norm[i:]
-        if tail:
+            while i >= 0:
+                tails.append(norm[i:])
+                i = norm.find(marker, i + 1)
+        for t in tails:
             for root in roots.values():
                 if root:
-                    out.append(os.path.normpath(str(root) + tail))
+                    out.append(os.path.normpath(str(root).rstrip("/\\") + t))
     seen: set[str] = set()
     return [c for c in out if not (c in seen or seen.add(c))]
 
