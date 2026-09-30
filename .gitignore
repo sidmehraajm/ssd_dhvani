@@ -17,3 +17,13 @@ _to_delete/
 # facial imports interrupted mid-copy
 *.importing/
 *.part
+
+# added by ssd_git_backfill
+venv/
+.env
+credentials*.json
+*.log
+.claude/
+*.bak
+*.zip
+.write_probe
