@@ -1,0 +1,17 @@
+{
+  "ayon_server_url": "http://ayon:5000",
+  "ayon_username": "",
+  "save_root": "~/Music/ssd_dhvani",
+  "remember_workstation": false,
+  "countdown_secs": 3,
+  "fps_display": 24,
+  "host_api": "",
+  "audio_device": "",
+  "samplerate": 48000,
+  "sample_format": "PCM_24",
+  "file_format": "WAV",
+  "wasapi_exclusive": false,
+  "audio_tracks": [{"role": "mic_main", "channel": 0}],
+  "publish_product_type": "auto",
+  "ffmpeg_path": ""
+}

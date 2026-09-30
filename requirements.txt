@@ -1,0 +1,6 @@
+# ssd_dhvani — runtime dependencies
+PySide6>=6.6
+ayon-python-api>=1.0    # AYON queries + publish; per-user login
+sounddevice>=0.4       # PortAudio: talks to the mic
+soundfile>=0.12        # writes WAV/FLAC (24-bit, float) via libsndfile
+numpy>=1.24            # audio blocks arrive as numpy arrays

@@ -1,0 +1,160 @@
+/* ssd_dhvani — dark, flat, high-density theme (spec §2).
+   Design tokens mirror the Claude Design "Control Room" mock (option 1b).
+   Colors here match the mock's exact hexes; spec estimate values in comments. */
+
+/* ---- tokens (reference) --------------------------------------------------
+   bg.app          #08090b   (spec #0b0b0d)   app background
+   bg.panel        #0b0d0f   (spec #141416)   side panels
+   bg.panel.raised #16181b   (spec #1a1a1d)   dropdowns, list rows
+   border.subtle   #1c1f23   (spec #242428)
+   text.primary    #e9edf0   (spec #f2f2f2)
+   text.secondary  #565d64 / #8b9298  (spec #8a8a90)
+   accent.orange   #e0952f   (spec #dd8a3d)
+   status.approve  #3fb950   status.reject #f2555a   status.view #4b9fff
+--------------------------------------------------------------------------- */
+
+QWidget {
+    background-color: #08090b;
+    color: #e9edf0;
+    font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+    font-size: 12px;
+}
+
+QWidget#Panel        { background-color: #0b0d0f; }
+QWidget#CenterStage  { background-color: #050607; }
+QWidget#TitleBar     { background-color: #0d0f11; border-bottom: 1px solid #1c1f23; }
+QWidget#Breadcrumb   { background-color: #0b0d0f; border-bottom: 1px solid #1c1f23; }
+QWidget#CommandBar   { background-color: #0b0d0f; border-top: 1px solid #1c1f23; }
+
+/* ---- section labels: small, uppercase, letter-spaced, orange ---- */
+QLabel#SectionLabel {
+    color: #e0952f;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#SectionLabelMuted {
+    color: #565d64;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#AppName   { color: #e9edf0; font-size: 13px; font-weight: 700; }
+QLabel#Crumb     { color: #6b7178; font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+QLabel#CrumbHi   { color: #e0952f; font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+QLabel#Mono      { font-family: 'IBM Plex Mono', monospace; }
+QLabel#Timecode  { font-family: 'IBM Plex Mono', monospace; font-size: 34px; font-weight: 700; color: #e9edf0; }
+QLabel#TimecodeRec { color: #f2555a; }
+QLabel#TcCaption { color: #565d64; font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: 1px; }
+QLabel#ArmedStatus { color: #8b9298; font-size: 11px; font-weight: 600; }
+
+/* ---- dropdowns: dark pill, chevron, no visible border ---- */
+QComboBox {
+    background-color: #16181b;
+    color: #e9edf0;
+    border: 1px solid #26292e;
+    border-radius: 7px;
+    padding: 7px 11px;
+    font-size: 12px;
+}
+QComboBox:hover { border-color: #33383e; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox::down-arrow {
+    image: none;
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #8b9298;
+    margin-right: 8px;
+}
+QComboBox QAbstractItemView {
+    background: #16181b; border: 1px solid #26292e;
+    selection-background-color: #e0952f; selection-color: #0d0f11;
+    color: #e9edf0; outline: none;
+}
+
+/* ---- text area ---- */
+QTextEdit, QPlainTextEdit {
+    background-color: #131518;
+    border: 1px solid #26292e;
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: #e9edf0;
+    font-size: 12px;
+}
+QTextEdit:focus { border-color: #e0952f; }
+QLineEdit {
+    background-color: #161b20;
+    border: 1px solid #2b3138;
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: #e7ebee;
+    font-size: 13px;
+}
+QLineEdit:focus { border-color: #e0952f; }
+
+/* ---- buttons ---- */
+QPushButton {
+    background-color: #16181b;
+    border: 1px solid #26292e;
+    border-radius: 8px;
+    padding: 9px 12px;
+    color: #e9edf0;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton:hover { background-color: #1c1f23; }
+QPushButton:pressed { background-color: #101214; }
+
+/* primary orange (Load, + Save Take) */
+QPushButton#Primary {
+    background-color: #e0952f; color: #0d0f11;
+    border: none; font-weight: 700;
+}
+QPushButton#Primary:hover  { background-color: #edaa4a; }
+QPushButton#Primary:pressed { background-color: #c9821f; }
+
+/* publish — filled green, full-width, larger */
+QPushButton#Publish {
+    background-color: #2f9e44; color: #ffffff;
+    border: 1px solid #3fb15a; border-radius: 9px;
+    padding: 14px; font-size: 14px; font-weight: 800; letter-spacing: 2px;
+}
+QPushButton#Publish:hover { background-color: #37b04e; }
+QPushButton#Publish:disabled {
+    background-color: #221a1b; color: #7a6b6c; border-color: #3a2a2c;
+}
+
+/* status toggle buttons */
+QPushButton#StatusReject  { border: 1px solid #f2555a; color: #f2555a; background: transparent; }
+QPushButton#StatusRejectOn { background: #f2555a; color: #0d0f11; border: 1px solid #f2555a; }
+QPushButton#StatusView    { border: 1px solid #4b9fff; color: #4b9fff; background: transparent; }
+QPushButton#StatusViewOn  { background: #4b9fff; color: #08090b; border: 1px solid #4b9fff; }
+QPushButton#StatusOkay    { border: 1px solid #20c997; color: #20c997; background: transparent; }
+QPushButton#StatusOkayOn  { background: #20c997; color: #0d0f11; border: 1px solid #20c997; }
+QPushButton#StatusApprove { border: 1px solid #3fb950; color: #3fb950; background: transparent; }
+QPushButton#StatusApproveOn { background: #3fb950; color: #0d0f11; border: 1px solid #3fb950; }
+
+/* record button drawn via paintEvent; keep frame neutral */
+QPushButton#Record { background: transparent; border: none; }
+
+/* Record / Review tab switcher */
+QPushButton#Tab {
+    background: transparent; border: none; color: #565d64;
+    padding: 7px 18px; font-weight: 700; letter-spacing: 1px; font-size: 11px;
+}
+QPushButton#Tab:hover { color: #8b9298; }
+QPushButton#TabOn {
+    background: #16181b; border: 1px solid #26292e; border-radius: 7px;
+    color: #e0952f; padding: 7px 18px; font-weight: 700;
+    letter-spacing: 1px; font-size: 11px;
+}
+
+QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }
+QScrollBar:vertical { background: #0b0d0f; width: 8px; }
+QScrollBar::handle:vertical { background: #26292e; border-radius: 4px; min-height: 24px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+/* search popup of the searchable dropdowns (QCompleter) */
+QListView { background: #16181b; color: #e9edf0; border: 1px solid #26292e;
+            selection-background-color: #e0952f; selection-color: #0d0f11; outline: none; }

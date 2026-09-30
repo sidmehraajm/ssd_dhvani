@@ -1,0 +1,152 @@
+/* ssd_dhvani — LIGHT theme. Same structure/selectors as styles.qss so the
+   two are drop-in swappable at runtime (View → theme toggle in the title bar).
+   Accent orange and the status colours are kept, darkened for contrast on
+   white; camera tiles stay dark (they frame video and are painted in code). */
+
+QWidget {
+    background-color: #f4f5f7;
+    color: #1b1f24;
+    font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+    font-size: 12px;
+}
+
+QWidget#Panel        { background-color: #ffffff; }
+QWidget#CenterStage  { background-color: #e9ebee; }
+QWidget#TitleBar     { background-color: #ffffff; border-bottom: 1px solid #d8dce1; }
+QWidget#Breadcrumb   { background-color: #ffffff; border-bottom: 1px solid #d8dce1; }
+QWidget#CommandBar   { background-color: #ffffff; border-top: 1px solid #d8dce1; }
+
+/* ---- section labels ---- */
+QLabel#SectionLabel {
+    color: #b56b0d;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#SectionLabelMuted {
+    color: #6b7178;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#AppName   { color: #1b1f24; font-size: 13px; font-weight: 700; }
+QLabel#Crumb     { color: #6b7178; font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+QLabel#CrumbHi   { color: #b56b0d; font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+QLabel#Mono      { font-family: 'IBM Plex Mono', monospace; }
+QLabel#Timecode  { font-family: 'IBM Plex Mono', monospace; font-size: 34px; font-weight: 700; color: #1b1f24; }
+QLabel#TimecodeRec { color: #d32f2f; }
+QLabel#TcCaption { color: #6b7178; font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: 1px; }
+QLabel#ArmedStatus { color: #4a5157; font-size: 11px; font-weight: 600; }
+
+/* ---- dropdowns ---- */
+QComboBox {
+    background-color: #ffffff;
+    color: #1b1f24;
+    border: 1px solid #c9ced4;
+    border-radius: 7px;
+    padding: 7px 11px;
+    font-size: 12px;
+}
+QComboBox:hover { border-color: #a7aeb6; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox::down-arrow {
+    image: none;
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #6b7178;
+    margin-right: 8px;
+}
+QComboBox QAbstractItemView {
+    background: #ffffff; border: 1px solid #c9ced4;
+    selection-background-color: #e0952f; selection-color: #ffffff;
+    color: #1b1f24; outline: none;
+}
+
+/* ---- text areas ---- */
+QTextEdit, QPlainTextEdit {
+    background-color: #ffffff;
+    border: 1px solid #c9ced4;
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: #1b1f24;
+    font-size: 12px;
+}
+QTextEdit:focus { border-color: #e0952f; }
+QLineEdit {
+    background-color: #ffffff;
+    border: 1px solid #c9ced4;
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: #1b1f24;
+    font-size: 13px;
+}
+QLineEdit:focus { border-color: #e0952f; }
+
+/* ---- buttons ---- */
+QPushButton {
+    background-color: #ffffff;
+    border: 1px solid #c9ced4;
+    border-radius: 8px;
+    padding: 9px 12px;
+    color: #1b1f24;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton:hover { background-color: #eef0f3; }
+QPushButton:pressed { background-color: #e2e5e9; }
+QPushButton:disabled { color: #9aa1a8; background-color: #f0f1f3; border-color: #dfe3e7; }
+
+QPushButton#Primary {
+    background-color: #e0952f; color: #ffffff;
+    border: none; font-weight: 700;
+}
+QPushButton#Primary:hover  { background-color: #edaa4a; }
+QPushButton#Primary:pressed { background-color: #c9821f; }
+
+QPushButton#Publish {
+    background-color: #2f9e44; color: #ffffff;
+    border: 1px solid #2a8d3d; border-radius: 9px;
+    padding: 14px; font-size: 14px; font-weight: 800; letter-spacing: 2px;
+}
+QPushButton#Publish:hover { background-color: #37b04e; }
+QPushButton#Publish:disabled {
+    background-color: #e6e8ea; color: #9aa1a8; border-color: #d8dce1;
+}
+
+/* status toggle buttons */
+QPushButton#StatusReject  { border: 1px solid #d32f2f; color: #d32f2f; background: transparent; }
+QPushButton#StatusRejectOn { background: #d32f2f; color: #ffffff; border: 1px solid #d32f2f; }
+QPushButton#StatusView    { border: 1px solid #1971c2; color: #1971c2; background: transparent; }
+QPushButton#StatusViewOn  { background: #1971c2; color: #ffffff; border: 1px solid #1971c2; }
+QPushButton#StatusOkay    { border: 1px solid #0c8599; color: #0c8599; background: transparent; }
+QPushButton#StatusOkayOn  { background: #0c8599; color: #ffffff; border: 1px solid #0c8599; }
+QPushButton#StatusApprove { border: 1px solid #2f9e44; color: #2f9e44; background: transparent; }
+QPushButton#StatusApproveOn { background: #2f9e44; color: #ffffff; border: 1px solid #2f9e44; }
+
+QPushButton#Record { background: transparent; border: none; }
+
+/* Record / Review tab switcher */
+QPushButton#Tab {
+    background: transparent; border: none; color: #6b7178;
+    padding: 7px 18px; font-weight: 700; letter-spacing: 1px; font-size: 11px;
+}
+QPushButton#Tab:hover { color: #1b1f24; }
+QPushButton#TabOn {
+    background: #ffffff; border: 1px solid #c9ced4; border-radius: 7px;
+    color: #b56b0d; padding: 7px 18px; font-weight: 700;
+    letter-spacing: 1px; font-size: 11px;
+}
+
+QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }
+QScrollBar:vertical { background: #eef0f3; width: 8px; }
+QScrollBar::handle:vertical { background: #c1c7ce; border-radius: 4px; min-height: 24px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+QProgressDialog { background-color: #ffffff; }
+QMenu { background-color: #ffffff; color: #1b1f24; border: 1px solid #c9ced4; }
+QMenu::item:selected { background-color: #e0952f; color: #ffffff; }
+
+/* search popup of the searchable dropdowns (QCompleter) */
+QListView { background: #ffffff; color: #1b1f24; border: 1px solid #c9ced4;
+            selection-background-color: #e0952f; selection-color: #ffffff; outline: none; }

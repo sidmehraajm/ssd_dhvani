@@ -1,0 +1,19 @@
+# local credentials (config.json stores the AYON password when
+# 'Remember this workstation' is ticked) — never commit it
+config.json
+
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.spec.bak
+.venv/
+*.wav
+*.flac
+
+# obsolete camera files moved aside on 2026-09-30
+_to_delete/
+# facial imports interrupted mid-copy
+*.importing/
+*.part
