@@ -14,6 +14,7 @@ Folder layout:
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 from .config import AppConfig
@@ -69,6 +70,15 @@ class TakeManager:
     # ------------------------------------------------------------------ #
     def new_take(self, comments: str = "", status: str = "view") -> TakeData:
         take_name = self.manifest.next_take_name()
+        # A leftover Take_NN folder that is NOT in the manifest (copied in by
+        # hand, old crash) is never reused -- its files would mix in.
+        n = int(take_name.split("_")[-1])
+        while (self._require_ctx() / take_name).exists():
+            n += 1
+            self.manifest.next_take = n
+            take_name = self.manifest.next_take_name()
+            n = int(take_name.split("_")[-1])
+        self.manifest.next_take = 0      # chosen number used -> back to auto
         take = TakeData(
             take=take_name,
             status=status if status in VALID_STATUS else "view",
@@ -81,9 +91,32 @@ class TakeManager:
             fps_display=int(self.config.fps_display),
         )
         self.manifest.takes.append(take)
+        self.manifest.takes.sort(key=lambda t: t.number)   # Take 3 before 4
         (self._require_ctx() / take_name).mkdir(parents=True, exist_ok=True)
         self.save()
         return take
+
+    def delete_take(self, take: TakeData) -> Path:
+        """Remove a take from the task. Its folder is MOVED to
+        {task}/_deleted/Take_NN_<time> -- not erased -- so a mis-click can be
+        undone by moving it back (and re-adding it is a manual job).
+        Published (locked) takes are refused: AYON already points at them."""
+        if getattr(take, "published_version", 0):
+            raise ValueError(f"{take.take} is published as "
+                             f"v{take.published_version:03d} — it can't be deleted")
+        root = self._require_ctx()
+        src = root / take.take
+        dest = None
+        if src.exists():
+            from datetime import datetime
+            bin_dir = root / "_deleted"
+            bin_dir.mkdir(exist_ok=True)
+            dest = bin_dir / f"{take.take}_{datetime.now():%Y%m%d-%H%M%S}"
+            shutil.move(str(src), str(dest))
+        self.manifest.takes = [t for t in self.manifest.takes
+                               if t.take != take.take]
+        self.save()
+        return dest
 
     def track_target_path(self, take: TakeData, role: str,
                           ext: str = ".wav") -> Path:

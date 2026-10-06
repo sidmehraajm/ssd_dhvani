@@ -139,6 +139,9 @@ class Manifest:
     shot: str = ""
     task: str = ""
     takes: list[TakeData] = field(default_factory=list)
+    #: Number the operator wants for the NEXT take (0 = automatic: last + 1).
+    #: Lets a task start at Take 3, or fill a gap left by a deleted take.
+    next_take: int = 0
 
     # ---- persistence ---------------------------------------------------- #
     @classmethod
@@ -149,7 +152,11 @@ class Manifest:
         data = json.loads(path.read_text(encoding="utf-8"))
         takes = [TakeData.from_dict(t) for t in data.get("takes", [])]
         meta = {k: data.get(k, "") for k in ("project", "sequence", "scene", "shot", "task")}
-        return cls(takes=takes, **meta)
+        try:
+            nxt = int(data.get("next_take") or 0)
+        except (TypeError, ValueError):
+            nxt = 0
+        return cls(takes=takes, next_take=nxt, **meta)
 
     def save(self, task_dir: Path) -> Path:
         path = Path(task_dir)
@@ -158,6 +165,7 @@ class Manifest:
         payload = {
             "project": self.project, "sequence": self.sequence, "scene": self.scene,
             "shot": self.shot, "task": self.task,
+            "next_take": int(self.next_take or 0),
             "takes": [t.to_dict() for t in self.takes],
         }
         # Write to a temp file, then rename: a crash mid-write can never
@@ -168,9 +176,18 @@ class Manifest:
         return out
 
     # ---- helpers -------------------------------------------------------- #
+    def next_take_number(self) -> int:
+        """The chosen number if set (moved up past numbers already used),
+        else last take + 1."""
+        used = {t.number for t in self.takes}
+        n = (self.next_take if self.next_take > 0
+             else max(used, default=0) + 1)
+        while n in used:
+            n += 1
+        return n
+
     def next_take_name(self) -> str:
-        n = max((t.number for t in self.takes), default=0) + 1
-        return f"Take_{n:02d}"
+        return f"Take_{self.next_take_number():02d}"
 
     def find(self, take_name: str) -> TakeData | None:
         return next((t for t in self.takes if t.take == take_name), None)

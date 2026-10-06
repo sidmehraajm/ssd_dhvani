@@ -2,7 +2,7 @@
 (the sound twin of ssd_abhinaya). Runs on Windows and macOS."""
 
 #: Full version. Bump the last part for fixes, the middle for features.
-__version__ = "1.3.1"
+__version__ = "1.7.0"
 
 #: Short tag used in the executable name (ssd_dhvani_v1.exe) and anywhere a
 #: compact build id is wanted. Only changes on a MAJOR release, so a v1 build

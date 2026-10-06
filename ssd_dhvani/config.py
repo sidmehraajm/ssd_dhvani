@@ -79,6 +79,35 @@ class AppConfig:
     # other value (e.g. "audio") forces that type for every take.
     publish_product_type: str = "auto"
 
+    # ---- session --------------------------------------------------------- #
+    last_project: str = ""           # re-selected on the next start
+    mic_collapsed: bool = False      # Record tab: mic section folded away
+
+    # ---- studio share (the drive AYON publishes to) ----------------------- #
+    # smb://kumbh/production is P:\ on Windows. On a Mac it must be mounted
+    # at the AYON 'darwin' root (e.g. /Volumes/production) before publishing.
+    share_url: str = "smb://kumbh/production"
+    share_user: str = ""
+    share_password_b64: str = ""     # only persisted when share_remember
+    share_remember: bool = True
+    share_auto_mount: bool = True    # try to mount at start + before publish
+    # Where the SHARE itself is mounted on a Mac. "" = /Volumes/<share>.
+    share_mount_point: str = ""
+    # The drive letter Windows maps the share to. On a Mac, AYON's Windows
+    # root 'P:/PR_PROJECTS/...' becomes '<mount point>/PR_PROJECTS/...'.
+    share_windows_drive: str = "P:"
+
+    @property
+    def share_password(self) -> str:
+        try:
+            return base64.b64decode(self.share_password_b64.encode()).decode()
+        except Exception:
+            return ""
+
+    def set_share_password(self, password: str) -> None:
+        self.share_password_b64 = (
+            base64.b64encode(password.encode()).decode() if password else "")
+
     # ---- password helpers ------------------------------------------------ #
     @property
     def ayon_password(self) -> str:
@@ -118,6 +147,8 @@ class AppConfig:
         # Never persist the password unless the operator opted in.
         if not self.remember_workstation:
             payload["ayon_password_b64"] = ""
+        if not self.share_remember:
+            payload["share_password_b64"] = ""
         try:
             path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:

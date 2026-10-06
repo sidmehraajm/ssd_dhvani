@@ -1,6 +1,6 @@
 # ssd_dhvani — Engineering Handoff
 
-**Repo:** `C:\pipeline\ssd_dhvani` · **Version:** `1.3.1` (`ssd_dhvani_v1`)
+**Repo:** `C:\pipeline\ssd_dhvani` · **Version:** `1.7.0` (`ssd_dhvani_v1`)
 **Origin:** forked from ssd_abhinaya 1.0.0 on 2026-09-30; the camera
 pipeline was replaced by an audio pipeline. Everything AYON-, shot-, take-,
 offline- and publish-related is abhinaya's proven code — its hard rules
@@ -151,6 +151,78 @@ type has its own product (own version numbers). An existing product is only
 converted from `generic`; a real type (audio<->render) is never flipped --
 the publish logs it and keeps the existing type. Any other config value
 forces that type and the plain product name (pre-1.3 behaviour).
+
+## 3d. Reload, last project, next-take drops, studio drive (1.4.0)
+
+- **⟳ Reload** (breadcrumb, online only): re-lists projects, re-loads the
+  project's folders (background; the picked shot is kept) and the current
+  shot's tasks (the picked task is kept; if it is gone, the first task).
+  Refused while a take records/saves.
+- **Last project**: `config.last_project`, written on every project pick,
+  re-selected at start (online and offline) if it still exists.
+- **Facial drop on a take that already has a video** no longer replaces it:
+  it goes to the next take (by number) with no video, not published, not
+  Reject; none -> a new take. **Shift+drop** = replace on the selected take
+  (with the confirm dialog). `_facial_target(replace)` / `_next_free_take`.
+- **Studio drive** (`share.py`, `ShareWorker`, title-bar **● Drive**):
+  grey = checking, green = mounted, red = missing. The path checked is
+  `share_mount_point`, else the project's AYON publish root for this OS,
+  else `/Volumes/<share>` / `P:\`. On macOS a `/Volumes/x` root only counts
+  if it is a real mount (`os.path.ismount`), never a local folder.
+  Mount: macOS `osascript mount volume` (credentials passed as argv, no
+  sudo, lands in `/Volumes/<share>`); Windows `net use P: \\kumbh\production
+  <pw> /user:<u> /persistent:yes`. Port 445 is probed first (3 s) so a dead
+  server fails fast. Detects the `/Volumes/production-1` trap and a stray
+  local `/Volumes/production` folder and says how to fix each.
+  Runs on project pick (if `share_auto_mount`) and **before every publish**;
+  publish is blocked with the reason if the drive can't be mounted.
+- Config: `share_url` (smb://kumbh/production), `share_user`,
+  `share_password_b64` (base64, only saved if `share_remember`, like the
+  AYON password), `share_auto_mount`, `share_mount_point`.
+
+## 3e. Mac publish = Windows publish (1.5.0)
+
+- The studio server's darwin roots were never set (`/Volumes/projects`), so
+  Mac publishes died at "root not reachable" -- after creating the version
+  (empty `_facial` versions on 30 Sep / 6 Oct).
+- `publish.local_roots()`: on Mac/Linux each WINDOWS root on the share drive
+  (`share_windows_drive`, P:) is translated to the share mount
+  (`share_mount_point`, default `/Volumes/<share>`): `P:/PR_PROJECTS/X` ->
+  `/Volumes/production/PR_PROJECTS/X`. Used by publish, the ● Drive check and
+  the read side (`ayon_client._local_roots`). A darwin root that exists on
+  disk still wins if the translated one doesn't.
+- Representation `attrib.path` is stored as the WINDOWS path
+  (`to_windows_path`), like the batch publisher -> AYON "copy path" and
+  Windows Resolve work. Templates stay `{root[publish]}/...`.
+- Order now matches the batch publisher: drive check, review render,
+  sidecar and file list BEFORE the product/version is created; a failure
+  after creation deletes the incomplete version.
+- ffmpeg fallback: `imageio-ffmpeg` (pip, static build, no Homebrew);
+  `media.probe` parses `ffmpeg -i` when there is no ffprobe.
+
+## 3f. Take numbers + delete (1.6.0)
+
+- **next #** spin box (TAKES header) -> `manifest.next_take` (0 = auto,
+  last + 1). Used by the next new take (record or video drop), then back to
+  auto. A used number moves up to the next free one; a stray `Take_NN`
+  folder not in the manifest is never reused. Takes stay sorted by number.
+- **Delete**: 🗑 on the row or right-click -> `TakeManager.delete_take`
+  moves the folder to `{task}/_deleted/Take_NN_<time>` (not erased) and
+  drops it from the manifest. Published (locked) takes are refused; refused
+  while recording / saving / importing a video / publishing.
+
+## 3g. Camera-first (1.7.0)
+
+- Review mp4 burn-in (`media.review_video(burn=, burn_color=)`, built in
+  `publish.build_facial_review`): bottom centre `TAKE NN`, plus `OKAY`
+  (teal box) / `APPROVED` (green box); View = number only. Status at
+  PUBLISH time. Only the review copy -- the `facial` master is untouched.
+  ffmpeg without `drawtext` -> review made without burn-in (logged).
+- ▾ MICROPHONE toggle folds the input bar, track strips and gain hint;
+  the drop zone stretches into the space. `config.mic_collapsed`. The
+  input stream stays open -> takes still record sound.
+- `DEFAULT_TASKS` now starts with `primarycam` (then primary_cam, primary,
+  facialrecording, then the audio names).
 
 ## 4. Takes
 

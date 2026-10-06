@@ -72,6 +72,17 @@ def ffmpeg() -> str:
     for cand in _FALLBACKS.get(sys.platform, ()):
         if os.path.exists(cand):
             return cand
+    # Last resort: the ffmpeg shipped inside the `imageio-ffmpeg` pip
+    # package -- a static build that runs on Intel Macs where Homebrew
+    # isn't supported (`pip install imageio-ffmpeg`). It has no ffprobe;
+    # media.probe() falls back to parsing `ffmpeg -i` then.
+    try:
+        import imageio_ffmpeg  # type: ignore
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
     return ""
 
 

@@ -37,7 +37,7 @@ def probe(path) -> dict:
     best effort; {} when ffprobe is missing or the file isn't media."""
     exe = tools.ffprobe()
     if not exe:
-        return {}
+        return _probe_with_ffmpeg(path)
     try:
         r = _run([exe, "-v", "error", "-show_entries",
                   "stream=codec_type,codec_name,width,height,r_frame_rate,"
@@ -78,6 +78,39 @@ def probe(path) -> dict:
     return out
 
 
+def _probe_with_ffmpeg(path) -> dict:
+    """probe() without ffprobe: read what `ffmpeg -i` prints, e.g.
+      Duration: 00:00:10.03, start: 0.000000, bitrate: ...
+      Stream #0:0(und): Video: h264 (High), yuv420p, 1920x1080, ..., 29.97 fps
+      Stream #0:1(und): Audio: aac (LC), 48000 Hz, stereo"""
+    import re
+    exe = tools.ffmpeg()
+    if not exe:
+        return {}
+    try:
+        r = _run([exe, "-hide_banner", "-i", str(path)], timeout=60, text=True)
+    except Exception as exc:
+        log.warning("ffmpeg -i failed for %s: %s", path, exc)
+        return {}
+    txt = r.stderr or ""
+    out: dict = {"has_audio": bool(re.search(r"Stream #\S+.*: Audio:", txt))}
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", txt)
+    if m:
+        h, mi, se = m.groups()
+        out["duration"] = int(h) * 3600 + int(mi) * 60 + float(se)
+    v = re.search(r"Stream #\S+.*: Video: (\w+).*?, (\d{2,5})x(\d{2,5})", txt)
+    if v:
+        out["codec"] = v.group(1)
+        out["width"], out["height"] = int(v.group(2)), int(v.group(3))
+        line = txt[v.start():txt.find("\n", v.start())]
+        f = re.search(r"([\d.]+) fps", line) or re.search(r"([\d.]+) tbr", line)
+        if f and 0 < float(f.group(1)) < 400:
+            out["fps"] = round(float(f.group(1)), 3)
+    if out.get("duration") and out.get("fps"):
+        out["frames"] = int(round(out["duration"] * out["fps"]))
+    return out if ("width" in out or out["has_audio"]) else {}
+
+
 def thumbnail(video, out_jpg, at: float = 1.0) -> Optional[Path]:
     """One frame, 480 px wide, as JPEG. None on failure."""
     exe = tools.ffmpeg()
@@ -115,8 +148,38 @@ def extract_audio(path, rate: int = 8000,
         return None
 
 
+_FONTS = (
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",     # macOS
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/Library/Fonts/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "C:/Windows/Fonts/arialbd.ttf",                          # Windows
+    "C:/Windows/Fonts/arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
+)
+
+
+def _drawtext(text: str, color: str = "") -> str:
+    """ffmpeg drawtext filter for a burn-in at the bottom centre.
+    `color` (hex like '3fb950') = a coloured box behind the text."""
+    import os
+    import re
+    safe = re.sub(r"[^A-Za-z0-9 _.#+-]", "", text)     # no : ' % \\ in text
+    font = next((f for f in _FONTS if os.path.exists(f)), "")
+    opts = []
+    if font:
+        # the drive colon (C:) must be escaped inside a filter option
+        opts.append("fontfile='%s'" % font.replace(":", "\\:"))
+    opts += [f"text='{safe}'", "fontcolor=white", "fontsize=h/20",
+             "x=(w-text_w)/2", "y=h-text_h-h/24",
+             "box=1", f"boxcolor=0x{color or '000000'}@0.75",
+             "boxborderw=14"]
+    return "drawtext=" + ":".join(opts)
+
+
 def review_video(video, out_mp4, *, audio=None, audio_delay: float = 0.0,
-                 log_cb=None) -> Optional[Path]:
+                 log_cb=None, burn: str = "",
+                 burn_color: str = "") -> Optional[Path]:
     """Browser-safe review copy of `video`: H.264 High / yuv420p, at most
     1920 wide, +faststart, AAC.
 
@@ -124,6 +187,10 @@ def review_video(video, out_mp4, *, audio=None, audio_delay: float = 0.0,
     placed `audio_delay` seconds after the video's start (negative = the mic
     started earlier, so its head is trimmed). Without `audio`, the video's
     own sound is kept (if any). Returns the path, or None on failure.
+
+    `burn`: text burnt in at the bottom (e.g. 'TAKE 03  APPROVED'). Only the
+    review copy gets it -- the camera's original is never touched. If this
+    ffmpeg can't draw text, the review is made without it (logged).
     """
     _cb = log_cb or (lambda s: None)
     exe = tools.ffmpeg()
@@ -131,6 +198,18 @@ def review_video(video, out_mp4, *, audio=None, audio_delay: float = 0.0,
         _cb("⚠ ffmpeg not found — no review video")
         return None
     out_mp4 = Path(out_mp4)
+    if burn:
+        made = _review_video(exe, video, out_mp4, audio, audio_delay, _cb,
+                             _drawtext(burn, burn_color))
+        if made is not None:
+            return made
+        _cb("⚠ burn-in failed (this ffmpeg may lack the 'drawtext' text "
+            "filter) — making the review without it")
+    return _review_video(exe, video, out_mp4, audio, audio_delay, _cb, "")
+
+
+def _review_video(exe, video, out_mp4, audio, audio_delay, _cb,
+                  overlay: str) -> Optional[Path]:
     tmp = out_mp4.with_name(out_mp4.stem + ".part.mp4")
     cmd = [exe, "-y", "-loglevel", "error", "-i", str(video)]
     if audio is not None:
@@ -141,7 +220,10 @@ def review_video(video, out_mp4, *, audio=None, audio_delay: float = 0.0,
             cmd += ["-af", f"adelay={int(round(audio_delay * 1000))}:all=1"]
     else:
         cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
-    cmd += ["-vf", "scale='min(1920,iw)':-2:flags=lanczos,format=yuv420p",
+    vf = "scale='min(1920,iw)':-2:flags=lanczos"
+    if overlay:
+        vf += "," + overlay            # burn-in AFTER scaling: same size always
+    cmd += ["-vf", vf + ",format=yuv420p",
             "-c:v", "libx264", "-profile:v", "high", "-preset", "veryfast",
             "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ac", "2",

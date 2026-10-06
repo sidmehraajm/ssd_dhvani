@@ -51,6 +51,12 @@ class AyonError(RuntimeError):
 _ROOT_TMPL = re.compile(r"^\{root\[(\w+)\]\}(.*)$")
 
 
+def _local_roots(project: str) -> dict:
+    """This machine's roots, with the Mac share translation (publish.py)."""
+    from .publish import local_roots
+    return local_roots(project)
+
+
 def _resolve_root_template(path: str, roots: dict) -> str | None:
     """'{root[publish]}/Proj/...' -> '<this machine's publish root>/Proj/...'"""
     m = _ROOT_TMPL.match(path)
@@ -327,7 +333,7 @@ class AyonClient:
         for r in reps:
             by_version.setdefault(r.get("versionId"), []).append(r)
         try:
-            roots = ayon_api.get_project_roots_by_site_id(project) or {}
+            roots = _local_roots(project)
         except Exception:
             roots = {}
 
@@ -395,7 +401,7 @@ class AyonClient:
         self._require()
         out: list[dict] = []
         try:
-            roots = ayon_api.get_project_roots_by_site_id(project) or {}
+            roots = _local_roots(project)
         except Exception:   # pragma: no cover
             roots = {}
         for version in self.versions_for_task(project, folder_id, task_id):
@@ -468,7 +474,7 @@ class AyonClient:
         reps = list(ayon_api.get_representations(
             project, version_ids=[version["id"]]))
         try:
-            roots = ayon_api.get_project_roots_by_site_id(project) or {}
+            roots = _local_roots(project)
         except Exception:  # pragma: no cover
             roots = {}
         raw: list[str] = []
