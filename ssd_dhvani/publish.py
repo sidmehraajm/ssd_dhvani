@@ -171,6 +171,7 @@ class PublishJob:
     review_path: Optional[str] = None
     take_name: str = ""
     take: object = None          # TakeData, for the published sidecar
+    republish: bool = False      # deliberate re-send as the NEXT version
 
 
 @dataclass
@@ -197,14 +198,18 @@ def publish_one(
     task_id: Optional[str],
     author: str = "",
     log_cb=None,
+    republish: bool = False,
 ) -> tuple[bool, str]:
     """Publish a single take to AYON for real. Returns (ok, message).
+
+    republish=True sends an already-published take again as the NEXT version
+    (the old version is left untouched).
 
     Returns (False, reason) -- never a fake success -- when it cannot publish.
     """
     if getattr(take, "status", "view") not in PUBLISHABLE:
         return False, f"{take.take}: status is {take.status} (only View/Okay/Approve publish)"
-    if getattr(take, "published_version", 0):
+    if getattr(take, "published_version", 0) and not republish:
         return False, (f"{take.take}: already published as "
                        f"v{take.published_version:03d} — locked, skipped")
     if not _HAVE_AYON:
@@ -213,6 +218,7 @@ def publish_one(
         return False, f"{take.take}: no AYON project/shot selected"
 
     job = _build_job(take, task_dir, project, folder_id, task_id, author)
+    job.republish = republish
     if not os.path.isdir(job.local_path) and not os.path.isfile(job.local_path):
         return False, f"{take.take}: no recorded files on disk to publish"
     try:
@@ -455,8 +461,14 @@ def build_facial_review(take, take_dir: Path, shot: str,
     safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", shot) or "shot"
     out = Path(take_dir) / f"{safe}_review_take{take.number}.mp4"
     _cb(f"{take.take}: rendering the review video ({how})…")
+    # Burn-in: take number, plus the review status when it is Okay/Approved
+    # (coloured like the status buttons) -- readable in AYON and Resolve.
+    status = getattr(take, "status", "view")
+    label, color = {"approve": ("APPROVED", "3fb950"),
+                    "okay": ("OKAY", "20c997")}.get(status, ("", ""))
+    burn = f"TAKE {take.number:02d}" + (f"   {label}" if label else "")
     made = media.review_video(video, out, audio=audio, audio_delay=delay,
-                              log_cb=_cb)
+                              log_cb=_cb, burn=burn, burn_color=color)
     if made is not None:
         fac.review = str(made.relative_to(task_dir)).replace("\\", "/")
         _cb(f"{take.take}: review video ready ({made.stat().st_size / 1e6:.1f} MB)")
@@ -571,7 +583,12 @@ def _post_representation(project: str, vid: str, repre: dict, dest_base: str,
         f"projects/{project}/representations",
         versionId=vid,
         name=repre["name"],
-        attrib={"ext": repre["ext"], "path": first_dest, "template": template},
+        # path = the WINDOWS path (P:/...), like the batch publisher: AYON's
+        # 'copy path' must give something Windows tools can open.
+        attrib={"ext": repre["ext"],
+                "path": to_windows_path(first_dest, project, root_name,
+                                        root_value),
+                "template": template},
         data={"context": context},
         files=files_payload,
     )
@@ -585,16 +602,105 @@ def _norm_src(p: str) -> str:
     return os.path.normcase(os.path.normpath(str(p))).replace("\\", "/").rstrip("/")
 
 
-def _publish_root(project: str) -> tuple:
-    """(root_name, root_value) this machine publishes into."""
-    roots = ayon_api.get_project_roots_by_site_id(project) or {}
-    if not roots:
-        raise ValueError(f"No Roots defined for project '{project}'.")
+# --------------------------------------------------------------------------- #
+# Roots: where THIS machine reads/writes the studio share
+# --------------------------------------------------------------------------- #
+#: The studio share as Windows maps it (drive) and where this Mac mounts it.
+#: Set from the config at startup (set_share). Windows publishes straight to
+#: its own root; a Mac uses the project's WINDOWS root with the drive letter
+#: swapped for the mount point -- so both write to the SAME folders even when
+#: the project's darwin root in AYON was never filled in (it still says
+#: '/Volumes/projects' on the studio server).
+SHARE = {"url": "smb://kumbh/production", "drive": "P:", "mount": ""}
+
+
+def set_share(url: str = "", drive: str = "", mount: str = "") -> None:
+    SHARE["url"] = url or SHARE["url"]
+    SHARE["drive"] = (drive or "P:").rstrip("\\/")
+    SHARE["mount"] = (mount or "").rstrip("/")
+
+
+def share_mount() -> str:
+    """Where the share appears on this Mac (default /Volumes/<share>)."""
+    if SHARE["mount"]:
+        return SHARE["mount"]
+    share = SHARE["url"].rstrip("/").rsplit("/", 1)[-1]
+    return f"/Volumes/{share}" if share else ""
+
+
+def win_to_local(path: str) -> str:
+    """'P:/PR_PROJECTS/x' -> '/Volumes/production/PR_PROJECTS/x' ('' if the
+    path is not on the share's drive)."""
+    p = str(path or "").replace("\\", "/")
+    drive = SHARE["drive"]
+    if sys.platform == "win32" or not p.upper().startswith(drive.upper()):
+        return ""
+    mount = share_mount()
+    return (mount + p[len(drive):]) if mount else ""
+
+
+def local_roots(project: str) -> dict:
+    """{root name: path} for THIS machine.
+
+    Windows: AYON's roots as they are. Mac/Linux: each Windows root that sits
+    on the share drive is translated to the share's mount point; that wins
+    over AYON's darwin/linux root unless only the latter exists on disk."""
+    site = dict(ayon_api.get_project_roots_by_site_id(project) or {})
+    if sys.platform == "win32":
+        return site
+    try:
+        win = ayon_api.get_project_roots_by_platform(project, "windows") or {}
+    except Exception:
+        win = {}
+    out = dict(site)
+    for name, wpath in win.items():
+        local = win_to_local(wpath)
+        if not local:
+            continue
+        other = str(site.get(name) or "")
+        if os.path.isdir(local) or not (other and os.path.isdir(other)):
+            out[name] = local
+    return out
+
+
+def windows_roots(project: str) -> dict:
+    try:
+        return dict(ayon_api.get_project_roots_by_platform(project, "windows")
+                    or {})
+    except Exception:
+        return {}
+
+
+def _pick_root(roots: dict) -> tuple:
     for key in ("publish", "work", "root"):
         if roots.get(key):
             return key, str(roots[key])
     name = list(roots)[0]
     return name, str(roots[name])
+
+
+def _publish_root(project: str) -> tuple:
+    """(root_name, root_value) this machine publishes into."""
+    roots = local_roots(project)
+    if not roots:
+        raise ValueError(f"No Roots defined for project '{project}'.")
+    return _pick_root(roots)
+
+
+def to_windows_path(path: str, project: str, root_name: str,
+                    root_value: str) -> str:
+    """A path under this machine's root -> the same file as Windows sees it
+    ('P:/PR_PROJECTS/...'), for attrib.path. AYON's 'copy path' and every
+    Windows tool then get a path that works for them -- the same thing the
+    batch publisher stores. Unchanged when no Windows root is known."""
+    p = str(path).replace("\\", "/")
+    if sys.platform == "win32":
+        return p
+    win = str(windows_roots(project).get(root_name) or "").replace("\\", "/")
+    rv = str(root_value).replace("\\", "/").rstrip("/")
+    if win and rv and p.lower().startswith(rv.lower()):
+        return win.rstrip("/") + p[len(rv):]
+    return p
 
 
 def _platform_key() -> str:
@@ -623,11 +729,11 @@ def _server_publish_path(project: str, folder_id: str, product_type: str,
                          product_name: str, variant: str, version_str: str,
                          log_cb=None) -> str:
     _cb = log_cb or (lambda s: None)
-    roots = ayon_api.get_project_roots_by_site_id(project)
+    roots = local_roots(project)
     if not roots:
         raise ValueError(f"No Roots defined for project '{project}'.")
-    _cb(f"AYON roots for this machine: {roots}")
-    _rn, root_path = _publish_root(project)
+    _cb(f"Publish roots for this machine: {roots}")
+    _rn, root_path = _pick_root(roots)
     root_path = str(root_path)
     if not root_path.strip() or not os.path.isabs(root_path):
         raise ValueError(
@@ -639,8 +745,8 @@ def _server_publish_path(project: str, folder_id: str, product_type: str,
         # The share isn't mounted / mapped. NEVER create it: on a Mac,
         # '/Volumes/<share>' would silently become a folder on the LOCAL disk
         # and the "published" files would exist nowhere anyone else can see.
-        hint = ("Mount the studio share first (Finder → Go → Connect to "
-                "Server) — it must appear exactly at this path."
+        hint = (f"Connect the studio drive ({SHARE['url']}) with ● Drive in "
+                f"the title bar — it must be mounted at {share_mount()}."
                 if sys.platform == "darwin" else
                 "Map / connect the studio drive first.")
         raise ValueError(f"Publish root {root_path!r} is not reachable from "
@@ -706,6 +812,8 @@ def _live_publish_job(job: PublishJob, log_cb=None) -> str:
         # take folder (version attrib 'source'), the take is already on the
         # server — lock it instead of duplicating it as a new version.
         try:
+            if job.republish:
+                raise StopIteration     # deliberate: skip the 'already on AYON' lock
             # Compare NORMALISED paths: the source attrib is stored with
             # forward slashes (version attribs patch below) while
             # job.local_path uses backslashes on Windows, so a raw == never
@@ -718,37 +826,33 @@ def _live_publish_job(job: PublishJob, log_cb=None) -> str:
         except AlreadyPublished:
             raise
         except Exception:
-            pass    # source check is best-effort only
+            pass    # source check is best-effort only (and StopIteration = skipped)
         lv = ayon_api.get_last_version_by_product_id(project, pid)
         next_v = (lv["version"] + 1) if lv else 1
     else:
-        with API_LOCK:
-            np_ = hub.add_new_product(product_type=product_type, name=safe,
-                                      folder_id=folder_id)
-            hub.commit_changes()
-        pid = np_["id"]
+        pid = None          # created below, only once everything is ready
         next_v = 1
 
     ver_str = f"v{next_v:03d}"
-    vkw = {"version": next_v, "product_id": pid}
-    if job.task_id:
-        vkw["task_id"] = job.task_id
-    with API_LOCK:
-        ve = hub.add_new_version(**vkw)
-    if job.author_name:
-        ve["author"] = job.author_name
-    try:
-        ve.attribs["source"] = job.local_path
-    except Exception:
-        pass
-    if job.comment:
-        try:
-            ve.attribs["comment"] = job.comment
-        except Exception:
-            pass
-    with API_LOCK:
-        hub.commit_changes()
-    vid = ve["id"]
+
+    # ---- CHECK & PREPARE first: nothing exists on the server yet --------- #
+    # (Like the batch publisher: a bad path / unmounted drive used to leave
+    # an EMPTY version behind -- seen on the facial products.)
+    dest_base = _server_publish_path(project, folder_id, product_type, safe,
+                                     job.variant, ver_str, log_cb=log_cb)
+    # A folder that already holds files is somebody's (or a failed attempt's)
+    # leftovers -- never write into it, move on to the next number instead.
+    for _ in range(50):
+        if not _folder_has_files(dest_base):
+            break
+        _cb(f"⚠ {ver_str} folder already has files — not writing into it, "
+            "trying the next version number")
+        next_v += 1
+        ver_str = f"v{next_v:03d}"
+        dest_base = os.path.join(os.path.dirname(dest_base), ver_str)
+    else:
+        raise RuntimeError("50 version folders in a row already hold files — "
+                           "something is wrong on the drive")
 
     # Facial video -> the browser-safe review mp4 (clean mic in sync), saved
     # INTO the take so it is published as the 'review' representation too.
@@ -776,31 +880,66 @@ def _live_publish_job(job: PublishJob, log_cb=None) -> str:
 
     # Collect the take's files: every track master + the sidecar. Temp /
     # half-written files are skipped.
-    files = []
-    if os.path.isfile(job.local_path):
-        fn = os.path.basename(job.local_path)
-        files.append((job.local_path, fn, fn))
-    elif os.path.isdir(job.local_path):
-        for root, dirs, fnames in os.walk(job.local_path):
-            # an interrupted facial import leaves 'facial.importing'
-            dirs[:] = [d for d in dirs if not d.endswith(".importing")]
-            for f in fnames:
-                # temp files, and hidden ones (the Review-tab thumbnail)
-                if f.lower().endswith(_SKIP_SUFFIXES) or f.startswith("."):
-                    continue
-                src = os.path.join(root, f)
-                rel = os.path.relpath(src, job.local_path)
-                files.append((src, rel, f))
+    files = collect_take_files(job.local_path)
     if not files:
         raise RuntimeError("no files to publish in take folder")
     files.sort(key=lambda it: it[1])       # deterministic representation order
 
-    dest_base = _server_publish_path(project, folder_id, product_type, safe,
-                                     job.variant, ver_str, log_cb=log_cb)
+    # ---- now create the product (if new) + version ---------------------- #
+    with API_LOCK:
+        if pid is None:
+            np_ = hub.add_new_product(product_type=product_type, name=safe,
+                                      folder_id=folder_id)
+            hub.commit_changes()
+            pid = np_["id"]
+        vkw = {"version": next_v, "product_id": pid}
+        if job.task_id:
+            vkw["task_id"] = job.task_id
+        ve = hub.add_new_version(**vkw)
+        if job.author_name:
+            ve["author"] = job.author_name
+        try:
+            ve.attribs["source"] = job.local_path
+        except Exception:
+            pass
+        if job.comment:
+            try:
+                ve.attribs["comment"] = job.comment
+            except Exception:
+                pass
+        hub.commit_changes()
+    vid = ve["id"]
+    copied: list = []
+    try:
+        return _fill_version(job, project, fe, te if job.task_id else None,
+                             name, safe, product_type, next_v, ver_str, vid,
+                             dest_base, files, facial_review, _cb, copied)
+    except Exception:
+        # Take back what THIS attempt wrote, so the next take can't trip over it.
+        _cleanup_copied(copied, dest_base, _cb)
+        # Never leave an empty / half version on AYON: remove it, so the
+        # next try reuses the number and loaders never see a broken one.
+        try:
+            ayon_api.delete(f"projects/{project}/versions/{vid}")
+            _cb(f"✕ publish failed — removed the incomplete {ver_str} "
+                "from AYON and the files it had copied")
+        except Exception as exc:
+            _cb(f"⚠ publish failed and the incomplete {ver_str} could not "
+                f"be removed: {exc}")
+        raise
+
+
+def _fill_version(job, project, fe, te, name, safe, product_type, next_v,
+                  ver_str, vid, dest_base, files, facial_review, _cb,
+                  copied=None):
+    """Copy the files, register representations + attribs, upload the
+    reviewable -- for a version that already exists."""
     _cb(f"{job.take_name}: {len(files)} file(s) → {dest_base}")
     for src, rel, _fname in files:
         dest = os.path.join(dest_base, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if copied is not None:
+            copied.append(dest)       # noted BEFORE the copy: a half file counts
         _copy_to_share(src, dest)
 
     # ---- representations, integrator-style ------------------------------ #
@@ -924,6 +1063,158 @@ def _live_publish_job(job: PublishJob, log_cb=None) -> str:
 
     return next_v, (f"Published {job.take_name}: {len(files)} file(s) -> "
                     f"{ver_str} @ {dest_base}")
+
+
+# --------------------------------------------------------------------------- #
+# File helpers, cleanup and CHECK
+# --------------------------------------------------------------------------- #
+def collect_take_files(local_path: str) -> list:
+    """[(src, rel, fname)] for everything a take publishes (sorted)."""
+    files = []
+    if os.path.isfile(local_path):
+        fn = os.path.basename(local_path)
+        files.append((local_path, fn, fn))
+    elif os.path.isdir(local_path):
+        for root, dirs, fnames in os.walk(local_path):
+            # an interrupted facial import leaves 'facial.importing'
+            dirs[:] = [d for d in dirs if not d.endswith(".importing")]
+            for f in fnames:
+                # temp files, and hidden ones (the Review-tab thumbnail)
+                if f.lower().endswith(_SKIP_SUFFIXES) or f.startswith("."):
+                    continue
+                src = os.path.join(root, f)
+                files.append((src, os.path.relpath(src, local_path), f))
+    files.sort(key=lambda it: it[1])       # deterministic representation order
+    return files
+
+
+def _folder_has_files(folder: str) -> bool:
+    """True if `folder` exists and holds at least one file (any depth)."""
+    if not os.path.isdir(folder):
+        return False
+    for _root, _dirs, fnames in os.walk(folder):
+        if fnames:
+            return True
+    return False
+
+
+def _cleanup_copied(copied: list, dest_base: str, _cb) -> None:
+    """Delete the files a failed publish copied, then any now-empty folders."""
+    removed, stuck = 0, []
+    for path in copied:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+        except OSError as exc:
+            stuck.append(f"{os.path.basename(path)} ({exc.strerror or exc})")
+    for root, _dirs, _files in os.walk(dest_base, topdown=False):
+        try:
+            os.rmdir(root)          # only succeeds on an EMPTY folder
+        except OSError:
+            pass
+    if removed:
+        _cb(f"🧹 removed {removed} file(s) the failed publish had copied")
+    if stuck:
+        _cb("⚠ could not remove: " + "; ".join(stuck)
+            + " — delete them by hand (the next publish skips this folder)")
+
+
+@dataclass
+class CheckReport:
+    ok: bool = True
+    version: int = 0
+    folder: str = ""
+    lines: list = field(default_factory=list)      # human-readable log lines
+    problems: int = 0
+
+    def bad(self, msg: str) -> None:
+        self.ok = False
+        self.problems += 1
+        self.lines.append("✕ " + msg)
+
+    def good(self, msg: str) -> None:
+        self.lines.append("✓ " + msg)
+
+    def warn(self, msg: str) -> None:
+        self.problems += 1
+        self.lines.append("⚠ " + msg)
+
+
+def check_take(take, *, task_dir: Optional[Path], project: str,
+               folder_id: Optional[str], task_id: Optional[str]) -> CheckReport:
+    """Compare a published take with what is on AYON and on the share.
+
+    Read-only: nothing is created, changed or deleted."""
+    rep = CheckReport(version=int(getattr(take, "published_version", 0) or 0))
+    if not rep.version:
+        rep.bad(f"{take.take} is not published yet")
+        return rep
+    if not _HAVE_AYON or not project or not folder_id:
+        rep.bad("not connected to AYON / no shot selected")
+        return rep
+    tag = f"{take.take} v{rep.version:03d}"
+    try:
+        fe = ayon_api.get_folder_by_id(project, folder_id)
+        raw = fe["name"]
+        if task_id:
+            te = ayon_api.get_task_by_id(project, task_id)
+            raw = f"{fe['name']}_{te['name']}"
+        ptype, pname = product_for(take, re.sub(r"[^a-zA-Z0-9_.-]", "_", raw))
+
+        # ---- 1. is the version still on AYON? ------------------------------ #
+        products = list(ayon_api.get_products(
+            project, folder_ids=[folder_id], product_names=[pname]))
+        if not products:
+            rep.bad(f"product '{pname}' is not on AYON any more")
+        else:
+            ptype = products[0].get("productType") or ptype
+            ver = ayon_api.get_version_by_name(
+                project, rep.version, products[0]["id"])
+            if not ver:
+                rep.bad(f"{tag} does not exist on AYON (deleted?)")
+            else:
+                n = len(list(ayon_api.get_representations(
+                    project, version_ids=[ver["id"]])))
+                if n:
+                    rep.good(f"{tag} is on AYON with {n} representation(s)")
+                else:
+                    rep.bad(f"{tag} is on AYON but has NO representations")
+
+        # ---- 2. files on the share vs the take on this disk ---------------- #
+        dest = _server_publish_path(project, folder_id, ptype, pname,
+                                    "main", f"v{rep.version:03d}")
+        rep.folder = dest
+        if not os.path.isdir(dest):
+            rep.bad(f"version folder is missing on the drive: {dest}")
+            return rep
+        local = str(Path(task_dir) / take.take) if task_dir else take.take
+        wanted = collect_take_files(local)
+        if not wanted:
+            rep.warn("no local files left to compare with")
+        seen = set()
+        for src, relp, _f in wanted:
+            seen.add(os.path.normcase(relp))
+            target = os.path.join(dest, relp)
+            if not os.path.isfile(target):
+                rep.bad(f"missing on the drive: {relp}")
+            elif os.path.getsize(target) != os.path.getsize(src):
+                rep.bad(f"size differs: {relp} (drive "
+                        f"{os.path.getsize(target):,} B, local "
+                        f"{os.path.getsize(src):,} B)")
+            else:
+                rep.good(f"{relp}  ({os.path.getsize(target) / 1e6:.1f} MB)")
+        # ---- 3. leftovers that do not belong to this take ------------------- #
+        for root, _d, fnames in os.walk(dest):
+            for f in fnames:
+                relp = os.path.relpath(os.path.join(root, f), dest)
+                if os.path.normcase(relp) not in seen:
+                    rep.warn(f"leftover in the version folder (not part of "
+                             f"this take): {relp}")
+    except Exception as exc:
+        log.exception("Check failed for %s", take.take)
+        rep.bad(f"check could not finish: {exc}")
+    return rep
 
 
 def _summarize(r: PublishResult) -> str:

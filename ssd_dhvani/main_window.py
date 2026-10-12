@@ -20,6 +20,7 @@ import shutil
 import sys
 import time
 import traceback
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +31,8 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QTextEdit, QScrollArea, QFrame, QLineEdit,
     QProgressBar, QFileDialog, QCompleter, QStackedWidget, QCheckBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QMenu,
-    QMessageBox,
+    QMessageBox, QDialog, QFormLayout, QDialogButtonBox, QApplication,
+    QSpinBox,
 )
 
 from . import __version__, VERSION_TAG, VERSION_LABEL
@@ -47,12 +49,14 @@ from . import tools
 from . import waveform as wave_mod
 from . import offline_cache as offline_mod
 from . import facial as facial_mod
+from . import share as share_mod
 from .widgets import (RecordButton, ClickableFrame, ReviewTile, TrackStrip,
                       DropZone, TRACK_COLORS, fmt_duration, fmt_db)
 
 #: Task selected automatically when a shot is picked -- the FIRST of these
 #: the shot has wins; otherwise the shot's first task is used.
-DEFAULT_TASKS = ("audio", "sound", "voice", "dialogue", "recording_package")
+DEFAULT_TASKS = ("primarycam", "primary_cam", "primary", "facialrecording",
+                 "audio", "sound", "voice", "dialogue", "recording_package")
 
 _STATUS_META = {
     "reject":  ("REJECT",   "#f2555a"),
@@ -71,8 +75,10 @@ class PublishWorker(QThread):
     logged = Signal(str)
     done = Signal(int, int, str)    # (published_count, total, last_reason)
 
-    def __init__(self, takes, task_dir, project, folder_id, task_id, author):
+    def __init__(self, takes, task_dir, project, folder_id, task_id, author,
+                 republish=False):
         super().__init__()
+        self._republish = republish
         self._takes = takes
         self._task_dir = task_dir
         self._project = project
@@ -91,7 +97,7 @@ class PublishWorker(QThread):
             ok, msg = publish.publish_one(
                 take, task_dir=self._task_dir, project=self._project,
                 folder_id=self._folder_id, task_id=self._task_id, author=self._author,
-                log_cb=self.logged.emit,
+                log_cb=self.logged.emit, republish=self._republish,
             )
             if ok:
                 published += 1
@@ -100,6 +106,21 @@ class PublishWorker(QThread):
             self.logged.emit(msg)
             self.progress.emit(int((i + 1) / total * 100))
         self.done.emit(published, total, last)
+
+
+class CheckWorker(QThread):
+    """Runs publish.check_take off the UI thread (it reads the network drive)."""
+    done = Signal(str, object)      # (take name, publish.CheckReport)
+
+    def __init__(self, take, task_dir, project, folder_id, task_id):
+        super().__init__()
+        self._take = take
+        self._args = dict(task_dir=task_dir, project=project,
+                          folder_id=folder_id, task_id=task_id)
+
+    def run(self):
+        rep = publish.check_take(self._take, **self._args)
+        self.done.emit(self._take.take, rep)
 
 
 class FacialImportWorker(QThread):
@@ -294,6 +315,25 @@ class OfflineDownloadWorker(QThread):
         self.done.emit(self._project, self._task, stats)
 
 
+class ShareWorker(QThread):
+    """Check (and if allowed, mount) the studio share off the GUI thread:
+    osascript / net use can take seconds, or hang on a dead server."""
+    logged = Signal(str)
+    done = Signal(object)          # share_mod.ShareStatus
+
+    def __init__(self, config, project: str, mount: bool):
+        super().__init__()
+        self._config, self._project, self._mount = config, project, mount
+
+    def run(self):
+        try:
+            st = share_mod.ensure(self._config, self._project,
+                                  mount=self._mount, log=self.logged.emit)
+        except Exception as exc:      # never let a thread raise
+            st = share_mod.ShareStatus(False, "", f"share check failed: {exc}")
+        self.done.emit(st)
+
+
 class FolderLoadWorker(QThread):
     """Loads one project's folder list without blocking the UI."""
 
@@ -391,6 +431,16 @@ class MainWindow(QMainWindow):
         self._shot_tasks: list = []          # ayon_client.Task list for current shot
         self._ref_path: str = ""             # loaded reference file (absolute)
         self._pub_worker: Optional[PublishWorker] = None
+        self._check_worker: Optional[CheckWorker] = None
+        self._check_state: dict = {}     # take name -> True (all good) / False
+        # studio drive check/mount (ShareWorker) state
+        self._share_worker: Optional[ShareWorker] = None
+        self._share_status = None          # last share_mod.ShareStatus
+        self._share_thens: list = []       # callbacks of the running check
+        self._share_queue: list = []       # (mount, callback) asked meanwhile
+        self._share_mounting = False
+        publish.set_share(config.share_url, config.share_windows_drive,
+                          config.share_mount_point)
 
         # audio runtime: ONE input, opened once and kept live
         self._input: Optional[rec_mod.AudioInput] = None
@@ -517,6 +567,16 @@ class MainWindow(QMainWindow):
                 f"color:{'#5fd47c' if connected else '#8b9298'};font-weight:600;font-size:11px;")
         h.addWidget(self.ayon_dot)
 
+        # Studio share (smb://kumbh/production == P:\\): grey = unknown,
+        # green = mounted, red = missing. Click = settings + connect.
+        self.drive_btn = QPushButton("● Drive")
+        self.drive_btn.setMinimumHeight(26)
+        self.drive_btn.setToolTip("Studio drive — click to set user/password "
+                                  "and connect")
+        self.drive_btn.clicked.connect(self._open_share_dialog)
+        self._paint_drive(None, "not checked yet")
+        h.addWidget(self.drive_btn)
+
         user = getattr(self.ayon, "username", "") or "?"
         avatar = QLabel(user[:2].upper())
         avatar.setToolTip(user)
@@ -595,6 +655,14 @@ class MainWindow(QMainWindow):
         self.sync_btn.clicked.connect(self._start_shot_sync)
         self.sync_btn.setVisible(not self.offline)
         h.addWidget(self.sync_btn)
+
+        self.reload_btn = QPushButton("⟳ Reload")
+        self.reload_btn.setToolTip(
+            "Re-read projects, shots and tasks from AYON (new shots/tasks "
+            "added on the server show up) — keeps your current selection")
+        self.reload_btn.clicked.connect(self._reload_all)
+        self.reload_btn.setVisible(not self.offline)
+        h.addWidget(self.reload_btn)
 
         self._make_searchable(
             self.cb_project, "type to search project…",
@@ -1081,16 +1149,33 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(16, 14, 16, 0)
         v.setSpacing(10)
 
-        v.addWidget(self._build_input_bar())
+        # Fold the whole mic section away -> the video drop area gets the room
+        # (camera-first sessions). The input keeps running while folded.
+        self.mic_toggle = QPushButton()
+        self.mic_toggle.setFlat(True)
+        self.mic_toggle.setStyleSheet(
+            "QPushButton{text-align:left;color:#8b9298;font-weight:700;"
+            "font-size:11px;letter-spacing:1px;border:none;padding:2px 0;}"
+            "QPushButton:hover{color:#e0952f;}")
+        self.mic_toggle.clicked.connect(self._toggle_mic)
+        v.addWidget(self.mic_toggle)
+        self.input_bar = self._build_input_bar()
+        v.addWidget(self.input_bar)
 
         # Track strips live here; the count-in number is drawn over them.
         self.tracks_host = QWidget()
         tv = QVBoxLayout(self.tracks_host)
         tv.setContentsMargins(0, 0, 0, 0)
         tv.setSpacing(8)
+        self._tracks_layout = tv
+        self.mic_panel = QWidget()
+        mp = QVBoxLayout(self.mic_panel)
+        mp.setContentsMargins(0, 0, 0, 0)
+        mp.setSpacing(8)
         self.strips_box = QVBoxLayout()
         self.strips_box.setSpacing(8)
-        tv.addLayout(self.strips_box)
+        mp.addLayout(self.strips_box)
+        tv.addWidget(self.mic_panel)
         add_row = QHBoxLayout()
         self.add_track_btn = QPushButton("＋ Add track")
         self.add_track_btn.setToolTip(
@@ -1099,7 +1184,7 @@ class MainWindow(QMainWindow):
         self.add_track_btn.clicked.connect(self._add_track_clicked)
         add_row.addWidget(self.add_track_btn)
         add_row.addStretch()
-        tv.addLayout(add_row)
+        mp.addLayout(add_row)
 
         # Facial recording: drop a video (or a zip with one) onto the take.
         self.drop_zone = DropZone()
@@ -1115,6 +1200,7 @@ class MainWindow(QMainWindow):
             "until you click the meter.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#6b737a;font-size:11px;")
+        self.gain_hint = hint
         tv.addWidget(hint)
         tv.addStretch(1)
         scroll = QScrollArea()
@@ -1133,7 +1219,25 @@ class MainWindow(QMainWindow):
         self.countdown_label.hide()
 
         v.addWidget(self._hscroll(self._build_command_bar(), 104))
+        self._apply_mic_collapsed(self.config.mic_collapsed)
         return stage
+
+    def _toggle_mic(self) -> None:
+        self.config.mic_collapsed = not self.config.mic_collapsed
+        self.config.save()
+        self._apply_mic_collapsed(self.config.mic_collapsed)
+
+    def _apply_mic_collapsed(self, collapsed: bool) -> None:
+        """Hide the mic controls (input bar, track strips, gain hint) and let
+        the drop area take their space. Recording is unaffected."""
+        for w in (self.input_bar, self.mic_panel, self.gain_hint):
+            w.setVisible(not collapsed)
+        tv = self._tracks_layout
+        tv.setStretchFactor(self.drop_zone, 1 if collapsed else 0)
+        tv.setStretch(tv.count() - 1, 0 if collapsed else 1)   # end spacer
+        self.mic_toggle.setText(
+            "▸  MICROPHONE  (hidden — still recording sound; click to show)"
+            if collapsed else "▾  MICROPHONE")
 
     def _build_input_bar(self) -> QWidget:
         """Two rows: WHICH device (driver, input), then HOW it records
@@ -1349,6 +1453,19 @@ class MainWindow(QMainWindow):
         takes_hdr = QHBoxLayout()
         takes_hdr.addWidget(self._section("TAKES", muted=True))
         takes_hdr.addStretch()
+        nxt_lbl = QLabel("next #")
+        nxt_lbl.setStyleSheet("color:#6b737a;font-size:10px;")
+        takes_hdr.addWidget(nxt_lbl)
+        # The number the NEXT take gets: set 3 to start this task at Take 3.
+        # A number already used moves up to the next free one.
+        self.next_take_spin = QSpinBox()
+        self.next_take_spin.setRange(1, 999)
+        self.next_take_spin.setFixedWidth(62)
+        self.next_take_spin.setToolTip(
+            "Number for the next take (recording or video drop). Set 3 to "
+            "start at Take 3. Already-used numbers are skipped.")
+        self.next_take_spin.valueChanged.connect(self._on_next_take_changed)
+        takes_hdr.addWidget(self.next_take_spin)
         self.take_count = QLabel("0 recorded")
         self.take_count.setStyleSheet(
             "color:#e0952f;font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:11px;")
@@ -1473,7 +1590,7 @@ class MainWindow(QMainWindow):
                 self._log(f"Offline: {nfold} shot(s) across {nproj} project(s) "
                           "from the local cache — pick one, or type a shot "
                           "number for a free-form offline take")
-                self._on_project(self.cb_project.currentText())
+                self._on_project(self._restore_last_project(projects))
             else:
                 self.crumb.setText("  OFFLINE — type a shot number above, press Enter")
                 self._log("Offline: no cached shots yet (sign in once on the "
@@ -1492,7 +1609,20 @@ class MainWindow(QMainWindow):
             self._log(f"Loaded {len(projects)} project(s)")
         else:
             self.crumb.setText("  no projects — check the log below")
-        self._on_project(self.cb_project.currentText())
+        self._on_project(self._restore_last_project(projects))
+
+    def _restore_last_project(self, projects: list) -> str:
+        """Select the project used last time (if it still exists)."""
+        last = self.config.last_project
+        name = last if last in projects else (projects[0] if projects else "")
+        if name:
+            self.cb_project.blockSignals(True)
+            self.cb_project.setCurrentIndex(self.cb_project.findText(name))
+            self.cb_project.blockSignals(False)
+            self.cb_project.lineEdit().setText(name)
+            if name == last:
+                self._log(f"Re-opened last project: {name}")
+        return name
 
     # ---- offline shot cache --------------------------------------------- #
     def _start_shot_sync(self) -> None:
@@ -1515,6 +1645,9 @@ class MainWindow(QMainWindow):
 
     def _on_project(self, project: str) -> None:
         self._current_project = project or ""
+        if project and project != self.config.last_project:
+            self.config.last_project = project
+            self.config.save()
         for c in (self.cb_shot, self.cb_task, self.cb_ref_task, self.cb_ref_ver):
             c.blockSignals(True)
             c.clear()
@@ -1540,6 +1673,13 @@ class MainWindow(QMainWindow):
         if cached:
             self._folders = cached
             self._fill_shots()
+        self._start_folder_load(project)
+        # Each project has its own AYON root -> check the drive for it.
+        self._check_share(mount=self.config.share_auto_mount)
+
+    def _start_folder_load(self, project: str) -> None:
+        """Fetch the project's folders in the background; the answer keeps
+        the currently picked shot (see _on_folders_loaded)."""
         self.cb_shot.lineEdit().setPlaceholderText(
             f"loading shots for {project}…")
         self._folder_gen = getattr(self, "_folder_gen", 0) + 1
@@ -1575,6 +1715,79 @@ class MainWindow(QMainWindow):
         self._log(f"✕ Could not list folders for {project}"
                   + (" — showing the cached list" if self._folders else "")
                   + f":\n{tb}")
+
+    # ---- ⟳ Reload: re-read everything from AYON, keep the selection ----- #
+    def _reload_all(self) -> None:
+        if self.offline:
+            return
+        if self._busy_recording():
+            self._log("Stop recording first, then reload")
+            return
+        project = self._current_project
+        self._log("⟳ Reloading projects, shots and tasks from AYON…")
+        try:
+            projects = self.ayon.list_projects()
+            self.shotdb.sync_projects(projects)
+        except Exception:
+            self._log_exc("Reload: could not list projects")
+            return
+        self._fill(self.cb_project, projects)
+        if project not in projects:
+            if project:
+                self._log(f"⚠ {project} is no longer on the server")
+            self._on_project(self._restore_last_project(projects))
+            return
+        self.cb_project.blockSignals(True)
+        self.cb_project.setCurrentIndex(self.cb_project.findText(project))
+        self.cb_project.blockSignals(False)
+        self.cb_project.lineEdit().setText(project)
+        self._start_folder_load(project)        # keeps the picked shot
+        if self._shot_id:
+            self._reload_tasks()
+        self._check_share(mount=False)          # just refresh the ● Drive dot
+
+    def _reload_tasks(self) -> None:
+        """Re-fetch the current shot's tasks; keep the task if it still exists."""
+        project = self._current_project
+        keep_task = self.cb_task.currentText()
+        keep_ref = self.cb_ref_task.currentText()
+        try:
+            tasks = self.ayon.tasks_for_folder(project, self._shot_id)
+            self.shotdb.sync_tasks(project, self._shot_id, tasks)
+        except Exception:
+            self._log_exc(f"Reload: could not fetch tasks for {self._shot_path}")
+            return
+        self._shot_tasks = tasks
+        for combo in (self.cb_task, self.cb_ref_task):
+            combo.blockSignals(True)
+            combo.clear()
+            for t in tasks:
+                combo.addItem(t.name, t.id)
+            combo.blockSignals(False)
+        ri = self.cb_ref_task.findText(keep_ref)
+        if ri >= 0:
+            self.cb_ref_task.blockSignals(True)
+            self.cb_ref_task.setCurrentIndex(ri)
+            self.cb_ref_task.blockSignals(False)
+        self._refresh_ref_versions()
+        self._log(f"✓ {len(tasks)} task(s) for {self._shot_path}")
+        if not tasks:
+            self._task_id = ""
+            self.crumb.setText(f"  {self._shot_path} / (no tasks)")
+            return
+        ti = self.cb_task.findText(keep_task)
+        if ti >= 0:
+            # same task: only refresh what it shows (takes stay selected)
+            self.cb_task.blockSignals(True)
+            self.cb_task.setCurrentIndex(ti)
+            self.cb_task.blockSignals(False)
+            self._task_id = self.cb_task.itemData(ti) or ""
+            self._refresh_takes()
+            self._refresh_published()
+        else:
+            self._log(f"⚠ task '{keep_task}' is gone — switched to "
+                      f"{self.cb_task.itemText(0)}")
+            self._on_task_selected(0)
 
     def _fill_shots(self, keep=None) -> None:
         """Repopulate the shot dropdown; `keep` re-selects the user's pick
@@ -2254,8 +2467,13 @@ class MainWindow(QMainWindow):
     # ================================================================= #
     # Facial recording: drop a video / zip onto a take
     # ================================================================= #
-    def _facial_target(self) -> tuple[Optional[TakeData], str]:
-        """(take the drop goes to -- None = a NEW take, reason text)."""
+    def _facial_target(self, replace: bool = False
+                       ) -> tuple[Optional[TakeData], str]:
+        """(take the drop goes to -- None = a NEW take, reason text).
+
+        A take that already HAS a video is not overwritten: the drop moves
+        on to the next take without one (else a new take). `replace`
+        (Shift held while dropping) targets the selected take anyway."""
         if self.drop_zone.new_take.isChecked():
             return None, "a NEW take (video only)"
         t = self.selected_take
@@ -2265,7 +2483,24 @@ class MainWindow(QMainWindow):
             return None, (f"a NEW take ({t.take} is published and locked)")
         if self._recording and t is self.selected_take:
             return None, "— wait: a take is recording"
+        if t.facial is not None and not replace:
+            nxt = self._next_free_take(t)
+            name = t.take.replace("_", " ")
+            if nxt is not None:
+                return nxt, (f"{nxt.take.replace('_', ' ')} (next take — "
+                             f"{name} already has a video)")
+            return None, f"a NEW take ({name} already has a video)"
         return t, t.take.replace("_", " ")
+
+    def _next_free_take(self, after: TakeData) -> Optional[TakeData]:
+        """First take after `after` (by number) with no video that is not
+        published and not rejected -- None if there is none."""
+        for t in sorted(self.takes.manifest.takes, key=lambda x: x.number):
+            if (t.number > after.number and t.facial is None
+                    and not getattr(t, "published_version", 0)
+                    and t.status != "reject"):
+                return t
+        return None
 
     def _update_drop_target(self) -> None:
         if not hasattr(self, "drop_zone"):
@@ -2275,13 +2510,15 @@ class MainWindow(QMainWindow):
             return
         take, why = self._facial_target()
         line = f"→ attaches to {why}"
-        if take is not None and take.facial is not None:
-            f = take.facial
+        sel = self.selected_take
+        if (sel is not None and sel.facial is not None
+                and not self.drop_zone.new_take.isChecked()):
+            f = sel.facial
             sync = (f"mic synced {f.sync_offset:+.3f} s ✓" if f.synced
                     else f.sync_note)
-            line = (f"{take.take.replace('_', ' ')} has: {Path(f.path).name} "
+            line = (f"{sel.take.replace('_', ' ')} has: {Path(f.path).name} "
                     f"({f.label}, {fmt_duration(f.duration)}) · {sync}\n"
-                    f"Drop again to REPLACE it on {why}")
+                    f"Next drop → {why} · Shift+drop replaces it")
         self.drop_zone.set_target_text(line)
 
     def _browse_facial(self) -> None:
@@ -2310,7 +2547,14 @@ class MainWindow(QMainWindow):
         if len(paths) > 1:
             self._log(f"⚠ {len(paths)} files dropped — importing only "
                       f"{src.name} (one facial video per take)")
-        take, _why = self._facial_target()
+        # Shift held while dropping = REPLACE the selected take's video;
+        # otherwise a take that already has one passes on to the next take.
+        replace = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        take, why = self._facial_target(replace=replace)
+        if (self.selected_take is not None and take is not self.selected_take
+                and self.selected_take.facial is not None and not replace):
+            self._log(f"↪ {self.selected_take.take} already has a video — "
+                      f"this one goes to {why}")
         if take is not None and take.facial is not None:
             if QMessageBox.question(
                     self, "Replace facial video",
@@ -2401,6 +2645,11 @@ class MainWindow(QMainWindow):
                 self._log_exc("Take file reconcile failed")
         takes = self.takes.manifest.takes
         self.take_count.setText(f"{len(takes)} recorded")
+        self.next_take_spin.blockSignals(True)
+        self.next_take_spin.setValue(self.takes.manifest.next_take_number())
+        self.next_take_spin.setEnabled(self.takes.task_dir is not None
+                                       and not self._busy_recording())
+        self.next_take_spin.blockSignals(False)
         nxt = (self.takes.manifest.next_take_name().replace("_", " ")
                if self.takes.task_dir is not None else "—")
         self.next_take_label.setText(
@@ -2493,8 +2742,113 @@ class MainWindow(QMainWindow):
         play.setFixedSize(24, 24)
         play.clicked.connect(lambda _c=False, t=take: self._play_take(t))
         h.addWidget(play)
+        if getattr(take, "published_version", 0):
+            state = self._check_state.get(take.take)
+            if state is not None:
+                mark = QLabel("✓" if state else "⚠")
+                mark.setToolTip("Last check: all good" if state else
+                                "Last check found problems — see the log")
+                mark.setStyleSheet(
+                    f"color:{'#5fd47c' if state else '#e0952f'};"
+                    "font-weight:700;font-size:13px;border:none;")
+                h.addWidget(mark)
+            chk = QPushButton("Check")
+            chk.setFixedHeight(24)
+            chk.setToolTip("Compare this published take with AYON and the "
+                           "studio drive (read-only)")
+            chk.clicked.connect(partial(self._check_take, take.take))
+            h.addWidget(chk)
+            rp = QPushButton("↻")
+            rp.setFixedSize(24, 24)
+            rp.setToolTip("Republish as the next version "
+                          "(the old version stays untouched)")
+            rp.clicked.connect(partial(self._republish_take, take.take))
+            h.addWidget(rp)
+        if not getattr(take, "published_version", 0):   # locked = no bin
+            trash = QPushButton("🗑")
+            trash.setFixedSize(24, 24)
+            trash.setToolTip(f"Delete {take.take.replace('_', ' ')}")
+            trash.clicked.connect(partial(self._delete_take, take.take))
+            h.addWidget(trash)
         row.clicked.connect(lambda t=take: self._select_take(t))
+        row.setContextMenuPolicy(Qt.CustomContextMenu)
+        row.customContextMenuRequested.connect(
+            partial(self._take_menu, row, take.take))
         return row
+
+    # ---- take numbering + delete ----------------------------------------- #
+    def _on_next_take_changed(self, value: int) -> None:
+        if self.takes.task_dir is None or self._busy_recording():
+            return
+        self.takes.manifest.next_take = int(value)
+        try:
+            self.takes.save()
+        except Exception:
+            self._log_exc("Could not save the next take number")
+        nxt = self.takes.manifest.next_take_name()
+        self.next_take_label.setText(f"NEXT  {nxt.replace('_', ' ')}")
+        if nxt != f"Take_{value:02d}":
+            self._log(f"Take {value:02d} already exists — next take will be "
+                      f"{nxt.replace('_', ' ')}")
+        self._update_drop_target()
+
+    def _take_menu(self, row, take_name: str, pos) -> None:
+        take = self.takes.manifest.find(take_name)
+        if take is None:
+            return
+        menu = QMenu(self)
+        act_play = menu.addAction("▶ Play")
+        act_del = menu.addAction(f"🗑 Delete {take_name.replace('_', ' ')}…")
+        if getattr(take, "published_version", 0):
+            act_del.setEnabled(False)
+            act_del.setText(f"🔒 Published v{take.published_version:03d} — "
+                            "can't delete")
+        act_chk = act_rep = None
+        if getattr(take, "published_version", 0):
+            menu.addSeparator()
+            act_chk = menu.addAction("✓ Check published version")
+            act_rep = menu.addAction(
+                f"↻ Republish as v{take.published_version + 1:03d}…")
+        chosen = menu.exec(row.mapToGlobal(pos))
+        if chosen is act_play:
+            self._play_take(take)
+        elif chosen is act_del:
+            self._delete_take(take_name)
+        elif act_chk is not None and chosen is act_chk:
+            self._check_take(take_name)
+        elif act_rep is not None and chosen is act_rep:
+            self._republish_take(take_name)
+
+    def _delete_take(self, take_name: str, *_args) -> None:
+        take = self.takes.manifest.find(take_name)
+        if take is None:
+            return
+        label = take_name.replace("_", " ")
+        busy = (self._busy_recording()
+                or (getattr(self, "_facial_worker", None) is not None
+                    and self._facial_worker.isRunning())
+                or (self._pub_worker is not None
+                    and self._pub_worker.isRunning()))
+        if busy:
+            self._log(f"Can't delete {label} now — wait until recording / "
+                      "saving / video import / publish has finished")
+            return
+        if QMessageBox.question(
+                self, "Delete take",
+                f"Delete {label}?\n\nIts folder is moved to _deleted inside "
+                "the task folder (not erased), so it can be brought back by "
+                "hand.") != QMessageBox.Yes:
+            return
+        try:
+            moved = self.takes.delete_take(take)
+        except Exception as exc:
+            self._log(f"✕ Could not delete {label}: {exc}")
+            return
+        if self.selected_take is not None and self.selected_take.take == take_name:
+            self.selected_take = None
+        self._log(f"🗑 {label} deleted"
+                  + (f" — files moved to {moved}" if moved else ""))
+        self._refresh_takes()
 
     def _select_take(self, take: TakeData) -> None:
         self.selected_take = take
@@ -3095,6 +3449,113 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
         self._log(f"📂 Opened {target}")
 
+    # ================================================================= #
+    # Studio drive (smb://kumbh/production == P:\\ on Windows)
+    # ================================================================= #
+    def _paint_drive(self, ok, tip: str) -> None:
+        color = "#8b9298" if ok is None else ("#5fd47c" if ok else "#f2555a")
+        self.drive_btn.setStyleSheet(
+            f"color:{color};font-weight:600;font-size:11px;")
+        self.drive_btn.setToolTip(
+            f"Studio drive {self.config.share_url}\n{tip}\n"
+            "Click to set user / password and connect")
+
+    def _check_share(self, mount: bool, then=None) -> None:
+        """Check the drive in the background; `then(status)` runs after."""
+        if self.offline:
+            self._paint_drive(None, "offline — not checked")
+            if then:
+                then(share_mod.ShareStatus(False, "", "working offline"))
+            return
+        w = self._share_worker
+        if w is not None and w.isRunning():
+            self._share_queue.append((mount, then))
+            return
+        self._run_share(mount, [then] if then else [])
+
+    def _run_share(self, mount: bool, thens: list) -> None:
+        self._share_thens = thens
+        self._share_mounting = mount
+        self._paint_drive(None, "checking…")
+        self._share_worker = self._keep(
+            ShareWorker(self.config, self._current_project, mount))
+        self._share_worker.logged.connect(self._log)
+        self._share_worker.done.connect(self._on_share_done)
+        self._share_worker.start()
+
+    def _on_share_done(self, st) -> None:
+        prev = self._share_status
+        self._share_status = st
+        self._paint_drive(st.ok, st.message)
+        if st.mounted_now:
+            self._log(f"✓ Studio drive mounted — {st.root}")
+        elif prev is None or prev.ok != st.ok or prev.message != st.message:
+            self._log(("✓ Studio drive: " if st.ok else "⚠ Studio drive: ")
+                      + st.message)
+        thens, self._share_thens = self._share_thens, []
+        queue, self._share_queue = self._share_queue, []
+        for fn in thens:
+            fn(st)
+        if not queue:
+            return
+        # Someone asked to MOUNT while a check-only run was going: run again.
+        if not st.ok and not self._share_mounting and any(m for m, _ in queue):
+            self._run_share(True, [fn for _m, fn in queue if fn])
+        else:
+            for _m, fn in queue:
+                if fn:
+                    fn(st)
+
+    def _open_share_dialog(self) -> None:
+        cfg = self.config
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Studio drive")
+        dlg.setMinimumWidth(460)
+        form = QFormLayout(dlg)
+        url = QLineEdit(cfg.share_url)
+        url.setPlaceholderText("smb://kumbh/production")
+        user = QLineEdit(cfg.share_user)
+        user.setPlaceholderText("studio login (empty = guest / keychain)")
+        pw = QLineEdit(cfg.share_password)
+        pw.setEchoMode(QLineEdit.Password)
+        root_now = getattr(self._share_status, "root", "") or "—"
+        point = QLineEdit(cfg.share_mount_point)
+        point.setPlaceholderText(publish.share_mount() or "/Volumes/production")
+        point.setToolTip(f"Where the share is mounted on this Mac (empty = "
+                         f"/Volumes/<share>). Publishing goes to {root_now}")
+        remember = QCheckBox("Remember password on this workstation")
+        remember.setChecked(cfg.share_remember)
+        auto = QCheckBox("Connect automatically (at start and before publish)")
+        auto.setChecked(cfg.share_auto_mount)
+        st = self._share_status
+        status = QLabel(st.message if st else "not checked yet")
+        status.setWordWrap(True)
+        form.addRow("Share", url)
+        form.addRow("User", user)
+        form.addRow("Password", pw)
+        form.addRow("Mount point", point)
+        form.addRow("", remember)
+        form.addRow("", auto)
+        form.addRow("Status", status)
+        box = QDialogButtonBox(QDialogButtonBox.Cancel)
+        box.addButton("Save && Connect", QDialogButtonBox.AcceptRole)
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        form.addRow(box)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        cfg.share_url = url.text().strip() or "smb://kumbh/production"
+        cfg.share_user = user.text().strip()
+        cfg.set_share_password(pw.text())
+        cfg.share_mount_point = point.text().strip()
+        cfg.share_remember = remember.isChecked()
+        cfg.share_auto_mount = auto.isChecked()
+        cfg.save()      # the password is only written if 'Remember' is on
+        publish.set_share(cfg.share_url, cfg.share_windows_drive,
+                          cfg.share_mount_point)
+        self._share_status = None          # log the next result again
+        self._check_share(mount=True)
+
     def _on_publish(self) -> None:
         pubs = publish.publishable(self.takes.manifest.takes)
         locked = [t for t in pubs if getattr(t, "published_version", 0)]
@@ -3113,6 +3574,20 @@ class MainWindow(QMainWindow):
             return
         if self._pub_worker is not None and self._pub_worker.isRunning():
             return
+        # The files go onto the studio drive: make sure it is mounted (and
+        # mount it if allowed) BEFORE anything is created in AYON.
+        self.publish_btn.setEnabled(False)
+        self.publish_note.setText("Checking the studio drive…")
+        self._check_share(mount=self.config.share_auto_mount,
+                          then=partial(self._publish_after_share, pubs))
+
+    def _publish_after_share(self, pubs: list, st) -> None:
+        if not st.ok:
+            self.publish_btn.setEnabled(True)
+            self.publish_note.setText(
+                "Studio drive not mounted — click ● Drive to connect")
+            self._log(f"✕ Publish blocked — studio drive: {st.message}")
+            return
         self.publish_btn.setEnabled(False)
         self.publish_progress.setValue(0)
         self.publish_progress.setVisible(True)
@@ -3122,6 +3597,87 @@ class MainWindow(QMainWindow):
             self._shot_id, self._task_id,
             author=getattr(self.ayon, "username", ""),
         ))
+        self._pub_worker.progress.connect(self.publish_progress.setValue)
+        self._pub_worker.logged.connect(self._log)
+        self._pub_worker.done.connect(self._on_publish_done)
+        self._pub_worker.start()
+
+    # ---- check + republish a published take ------------------------------ #
+    def _publish_busy(self) -> bool:
+        return ((self._pub_worker is not None and self._pub_worker.isRunning())
+                or (self._check_worker is not None
+                    and self._check_worker.isRunning()))
+
+    def _check_take(self, take_name: str, *_args) -> None:
+        take = self.takes.manifest.find(take_name)
+        if take is None or not getattr(take, "published_version", 0):
+            return
+        if not self.ayon.is_connected or not self._shot_id:
+            self._log("Check needs AYON: connect and select a shot/task first")
+            return
+        if self._publish_busy():
+            self._log("Wait for the running publish / check to finish")
+            return
+        self._log(f"🔍 Checking {take_name} v{take.published_version:03d}…")
+        # The drive must be mounted to look at the files (never mount here).
+        self._check_share(mount=self.config.share_auto_mount,
+                          then=partial(self._check_after_share, take))
+
+    def _check_after_share(self, take, st) -> None:
+        if not st.ok:
+            self._log(f"✕ Check blocked — studio drive: {st.message}")
+            return
+        self._check_worker = self._keep(CheckWorker(
+            take, self.takes.task_dir, self.takes.manifest.project,
+            self._shot_id, self._task_id))
+        self._check_worker.done.connect(self._on_check_done)
+        self._check_worker.start()
+
+    def _on_check_done(self, take_name: str, rep) -> None:
+        for line in rep.lines:
+            self._log("   " + line)
+        self._check_state[take_name] = bool(rep.ok and rep.problems == 0)
+        if self._check_state[take_name]:
+            self._log(f"✓ {take_name} v{rep.version:03d}: everything is in place")
+        else:
+            self._log(f"⚠ {take_name} v{rep.version:03d}: {rep.problems} "
+                      "problem(s) — use ↻ Republish to send it again as the "
+                      "next version")
+        self._refresh_takes()
+
+    def _republish_take(self, take_name: str, *_args) -> None:
+        take = self.takes.manifest.find(take_name)
+        if take is None or not getattr(take, "published_version", 0):
+            return
+        if not self.ayon.is_connected or not self._shot_id:
+            self._log("Republish needs AYON: connect and select a shot/task first")
+            return
+        if self._publish_busy():
+            self._log("Wait for the running publish / check to finish")
+            return
+        old = take.published_version
+        if QMessageBox.question(
+                self, "Republish take",
+                f"Publish {take_name.replace('_', ' ')} again as the next "
+                f"version?\n\nv{old:03d} stays on AYON untouched; the new "
+                "version becomes this take's published version.") != QMessageBox.Yes:
+            return
+        self.publish_btn.setEnabled(False)
+        self.publish_note.setText(f"Republishing {take_name}…")
+        self._check_share(mount=self.config.share_auto_mount,
+                          then=partial(self._republish_after_share, take))
+
+    def _republish_after_share(self, take, st) -> None:
+        if not st.ok:
+            self._refresh_publish_note()
+            self._log(f"✕ Republish blocked — studio drive: {st.message}")
+            return
+        self.publish_progress.setValue(0)
+        self.publish_progress.setVisible(True)
+        self._pub_worker = self._keep(PublishWorker(
+            [take], self.takes.task_dir, self.takes.manifest.project,
+            self._shot_id, self._task_id,
+            author=getattr(self.ayon, "username", ""), republish=True))
         self._pub_worker.progress.connect(self.publish_progress.setValue)
         self._pub_worker.logged.connect(self._log)
         self._pub_worker.done.connect(self._on_publish_done)
@@ -3142,7 +3698,9 @@ class MainWindow(QMainWindow):
         else:
             self.publish_note.setText(f"Published 0/{total} — {last_reason}")
         self._log(f"Publish complete: {published}/{total}")
+        self._check_state.clear()        # versions changed: old checks are stale
         self._refresh_published()
+        self._refresh_takes()
 
     # ================================================================= #
     # Loop: refresh previews + timecode
